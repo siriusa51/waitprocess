@@ -1,0 +1,307 @@
+package waitprocess
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	defaultTimeout = 10
+
+	stateReady   = uint32(0)
+	stateRunning = uint32(1)
+	stateStop    = uint32(2)
+)
+
+type eventType int
+
+const (
+	typeRegisterProcess = iota
+	typeRegisterSignal
+	typeStart
+	typeStop
+)
+
+type event struct {
+	types  eventType
+	option interface{}
+	errCh  chan error
+}
+
+type WaitProcess struct {
+	state uint32
+
+	timeout   int
+	stopOnce  sync.Once
+	waitGroup sync.WaitGroup
+	stopCh    chan struct{}
+	processes Processes
+
+	cancelFunc context.CancelFunc
+
+	signals []os.Signal
+	events  chan event
+	waitCh  chan struct{}
+}
+
+var (
+	once       sync.Once
+	defaultObj *WaitProcess
+)
+
+func Default() *WaitProcess {
+	once.Do(func() {
+		defaultObj = New()
+	})
+
+	return defaultObj
+}
+
+type Process struct {
+	ServeForver        func()
+	Stop               func(ctx context.Context)
+	ServeForverWithCtx func(ctx context.Context)
+}
+
+type Processes []Process
+
+func (fps Processes) run(wp *WaitProcess) {
+	ctx, fun := context.WithCancel(context.Background())
+	wp.cancelFunc = fun
+
+	for _, sp := range fps {
+		go func(sp Process) {
+			if sp.ServeForverWithCtx != nil {
+				sp.ServeForverWithCtx(ctx)
+			} else if sp.ServeForver != nil {
+				sp.ServeForver()
+			}
+
+			_ = wp.Stop()
+		}(sp)
+	}
+}
+
+func (fps Processes) stop(wp *WaitProcess, ctx context.Context) {
+	for _, sp := range fps {
+		go func(sp Process) {
+			if sp.Stop != nil {
+				sp.Stop(ctx)
+			}
+
+			wp.waitGroup.Done()
+		}(sp)
+	}
+}
+
+func New() *WaitProcess {
+	wp := &WaitProcess{
+		state:  stateReady,
+		stopCh: make(chan struct{}),
+		events: make(chan event),
+		waitCh: make(chan struct{}),
+	}
+	go wp.eventLoop()
+	return wp
+}
+
+func (wp *WaitProcess) getState() uint32 {
+	return atomic.LoadUint32(&wp.state)
+}
+
+func (wp *WaitProcess) setState(s uint32) {
+	atomic.StoreUint32(&wp.state, s)
+}
+
+func (wp *WaitProcess) eventLoop() {
+	for {
+		select {
+		case e := <-wp.events:
+			wp.processEvent(e)
+		case <-wp.stopCh:
+			// stop signal
+			wp.doStop()
+		}
+	}
+}
+
+func (wp *WaitProcess) processEvent(e event) {
+	switch e.types {
+	case typeRegisterProcess:
+		e.errCh <- wp.registerProcess(e.option.(Processes)...)
+	case typeRegisterSignal:
+		e.errCh <- wp.registerSignal(e.option.([]os.Signal)...)
+	case typeStart:
+		e.errCh <- wp.start(e.option.([]int)...)
+	case typeStop:
+		e.errCh <- wp.stop()
+	default:
+		e.errCh <- fmt.Errorf("unknown event type")
+	}
+}
+
+func (wp *WaitProcess) pushEvent(etype eventType, option interface{}) error {
+	e := event{
+		types:  etype,
+		option: option,
+		errCh:  make(chan error),
+	}
+	wp.events <- e
+	return <-e.errCh
+}
+
+// single thead
+func (wp *WaitProcess) RegisterProcess(processes ...Process) error {
+	return wp.pushEvent(typeRegisterProcess, Processes(processes))
+}
+
+// single thead
+// add loop forerver process functions
+func (wp *WaitProcess) registerProcess(processes ...Process) error {
+	if wp.getState() != stateReady {
+		return fmt.Errorf("waitprocess is started")
+	}
+
+	wp.processes = append(wp.processes, processes...)
+	return nil
+}
+
+// single thead
+func (wp *WaitProcess) RegisterSignal(sigs ...os.Signal) error {
+	return wp.pushEvent(typeRegisterSignal, sigs)
+}
+
+// single thead
+// add os signal
+func (wp *WaitProcess) registerSignal(sigs ...os.Signal) error {
+	if wp.getState() != stateReady {
+		return fmt.Errorf("waitprocess is started")
+	}
+	if len(sigs) == 0 {
+		return nil
+	}
+
+	wp.signals = append(wp.signals, sigs...)
+	return nil
+}
+
+// single thead
+func (wp *WaitProcess) Stop() error {
+	return wp.pushEvent(typeStop, nil)
+}
+
+// single thead
+func (wp *WaitProcess) stop() error {
+	if wp.getState() == stateReady {
+		return fmt.Errorf("waitprocess not started")
+	}
+
+	if wp.getState() == stateStop {
+		return nil
+	}
+
+	// set state
+	wp.setState(stateStop)
+
+	// notify stop
+	wp.stopCh <- struct{}{}
+	return nil
+}
+
+// single thead
+func (wp *WaitProcess) Start(timeout ...int) error {
+	return wp.pushEvent(typeStart, timeout)
+}
+
+// single thead
+func (wp *WaitProcess) start(timeout ...int) error {
+	if wp.getState() != stateReady {
+		return fmt.Errorf("waitprocess is started")
+	}
+
+	wp.setState(stateRunning)
+
+	if len(timeout) > 1 {
+		wp.timeout = timeout[0]
+	}
+
+	if len(wp.signals) != 0 {
+		wp.processes = append(wp.processes, Process{
+			ServeForver: func() {
+				ch := make(chan os.Signal)
+				signal.Notify(ch, wp.signals...)
+				select {
+				case <-ch:
+				}
+			},
+		})
+	}
+
+	wp.waitGroup.Add(len(wp.processes))
+	wp.stopCh = make(chan struct{}, len(wp.processes)+1)
+	wp.processes.run(wp)
+
+	return nil
+}
+
+func (wp *WaitProcess) doStop() {
+	if wp.timeout < 0 {
+		wp.timeout = defaultTimeout
+	}
+
+	signal.Reset(wp.signals...)
+
+	ctx, timeoutFunc := context.WithTimeout(context.Background(), time.Second*time.Duration(wp.timeout))
+	defer timeoutFunc()
+
+	wp.cancelFunc()
+	wp.processes.stop(wp, ctx)
+
+	waitGroupCh := make(chan struct{})
+
+	go func() {
+		wp.waitGroup.Wait()
+		waitGroupCh <- struct{}{}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// timeout
+	case <-waitGroupCh:
+		// stop function done
+	}
+
+	// notify wait
+	close(wp.waitCh)
+}
+
+func (wp *WaitProcess) Wait() {
+	select {
+	case <-wp.waitCh:
+	}
+}
+
+func RegisterProcess(processes ...Process) error {
+	return Default().RegisterProcess(processes...)
+}
+
+func RegisterSignal(sigs ...os.Signal) error {
+	return Default().registerSignal(sigs...)
+}
+
+func Stop() error {
+	return Default().Stop()
+}
+
+func Start(timeout ...int) error {
+	return Default().Start(timeout...)
+}
+
+func Wait() {
+	Default().Wait()
+}
