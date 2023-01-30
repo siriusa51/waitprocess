@@ -37,16 +37,17 @@ type WaitProcess struct {
 	state uint32
 
 	timeout   int
-	stopOnce  sync.Once
-	waitGroup sync.WaitGroup
+	once      sync.Once
+	startWG   sync.WaitGroup
+	stopWG    sync.WaitGroup
 	stopCh    chan struct{}
 	processes Processes
 
 	cancelFunc context.CancelFunc
 
-	signals []os.Signal
-	events  chan event
-	waitCh  chan struct{}
+	signals  []os.Signal
+	events   chan event
+	finishCh chan struct{}
 }
 
 var (
@@ -94,19 +95,19 @@ func (fps Processes) stop(wp *WaitProcess, ctx context.Context) {
 				sp.Stop(ctx)
 			}
 
-			wp.waitGroup.Done()
+			wp.stopWG.Done()
 		}(sp)
 	}
 }
 
 func New() *WaitProcess {
 	wp := &WaitProcess{
-		state:  stateReady,
-		stopCh: make(chan struct{}),
-		events: make(chan event),
-		waitCh: make(chan struct{}),
+		state:    stateReady,
+		stopCh:   make(chan struct{}),
+		events:   make(chan event),
+		finishCh: make(chan struct{}),
 	}
-	go wp.eventLoop()
+
 	return wp
 }
 
@@ -126,6 +127,7 @@ func (wp *WaitProcess) eventLoop() {
 		case <-wp.stopCh:
 			// stop signal
 			wp.doStop()
+			break
 		}
 	}
 }
@@ -146,13 +148,36 @@ func (wp *WaitProcess) processEvent(e event) {
 }
 
 func (wp *WaitProcess) pushEvent(etype eventType, option interface{}) error {
+	wp.once.Do(func() {
+		go wp.eventLoop()
+	})
+
 	e := event{
 		types:  etype,
 		option: option,
 		errCh:  make(chan error),
 	}
-	wp.events <- e
-	return <-e.errCh
+
+	select {
+	case wp.events <- e:
+	case <-wp.finishCh:
+		if etype == typeStop {
+			return nil
+		}
+
+		return fmt.Errorf("waitprocess is stopped")
+	}
+
+	select {
+	case err := <-e.errCh:
+		return err
+	case <-wp.finishCh:
+		if etype == typeStop {
+			return nil
+		}
+
+		return fmt.Errorf("waitprocess is stopped")
+	}
 }
 
 // single thead
@@ -166,7 +191,11 @@ func (wp *WaitProcess) registerProcess(processes ...Process) error {
 	if wp.getState() != stateReady {
 		return fmt.Errorf("waitprocess is started")
 	}
-
+	for _, p := range processes {
+		if p.ServeForver != nil && p.Stop == nil {
+			return fmt.Errorf("if you want to set Process.ServeForver, then you must also set Process.Stop")
+		}
+	}
 	wp.processes = append(wp.processes, processes...)
 	return nil
 }
@@ -242,7 +271,7 @@ func (wp *WaitProcess) start(timeout ...int) error {
 		})
 	}
 
-	wp.waitGroup.Add(len(wp.processes))
+	wp.stopWG.Add(len(wp.processes))
 	wp.stopCh = make(chan struct{}, len(wp.processes)+1)
 	wp.processes.run(wp)
 
@@ -265,7 +294,7 @@ func (wp *WaitProcess) doStop() {
 	waitGroupCh := make(chan struct{})
 
 	go func() {
-		wp.waitGroup.Wait()
+		wp.stopWG.Wait()
 		waitGroupCh <- struct{}{}
 	}()
 
@@ -277,13 +306,31 @@ func (wp *WaitProcess) doStop() {
 	}
 
 	// notify wait
-	close(wp.waitCh)
+	close(wp.finishCh)
 }
 
+// wait process stop
 func (wp *WaitProcess) Wait() {
 	select {
-	case <-wp.waitCh:
+	case <-wp.finishCh:
 	}
+}
+
+// process will start and block to the end
+func (wp *WaitProcess) Run(timeout ...int) error {
+	if err := wp.Start(timeout...); err != nil {
+		return err
+	}
+	wp.Wait()
+	return nil
+}
+
+func (wp *WaitProcess) StopAndWait() error {
+	if err := wp.Stop(); err != nil {
+		return err
+	}
+	wp.Wait()
+	return nil
 }
 
 func RegisterProcess(processes ...Process) error {
@@ -304,4 +351,12 @@ func Start(timeout ...int) error {
 
 func Wait() {
 	Default().Wait()
+}
+
+func StopAndWait() error {
+	return Default().StopAndWait()
+}
+
+func Run() error {
+	return Default().Run()
 }

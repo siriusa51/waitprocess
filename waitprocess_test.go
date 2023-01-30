@@ -14,7 +14,7 @@ func TestWaitProcess(t *testing.T) {
 	obj := New()
 	count := uint32(0)
 	ch := make(chan struct{})
-	_ = obj.RegisterProcess(
+	err := obj.RegisterProcess(
 		Process{
 			ServeForverWithCtx: func(ctx context.Context) {
 				select {
@@ -35,11 +35,37 @@ func TestWaitProcess(t *testing.T) {
 			},
 		},
 	)
+	assert.NoError(t, err)
+
+	// Stop() cannot be called before waitprocess has started
+	err = obj.Stop()
+	assert.Error(t, err)
 
 	_ = obj.Start(1)
 
+	// Cannot call RegisterProcess() after wp has already started
+	err = obj.registerProcess(Process{
+		ServeForverWithCtx: func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+			}
+		},
+	})
+	assert.Error(t, err)
+
 	time.Sleep(time.Second * time.Duration(1))
-	_ = obj.Stop()
+	err = obj.Stop()
+	assert.NoError(t, err)
+
+	// Cannot call RegisterProcess() after wp has already stopped
+	err = obj.registerProcess(Process{
+		ServeForverWithCtx: func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+			}
+		},
+	})
+	assert.Error(t, err)
 
 	time.Sleep(time.Second * time.Duration(1))
 	assert.Equal(t, uint32(2), count)
@@ -48,11 +74,12 @@ func TestWaitProcess(t *testing.T) {
 func TestSignal(t *testing.T) {
 	obj := New()
 	count := uint32(0)
-	_ = obj.registerSignal(syscall.SIGUSR1)
+	err := obj.registerSignal(syscall.SIGUSR1)
+	assert.NoError(t, err)
 
 	ch := make(chan struct{})
 
-	_ = obj.RegisterProcess(
+	err = obj.RegisterProcess(
 		Process{
 			ServeForverWithCtx: func(ctx context.Context) {
 				select {
@@ -73,14 +100,25 @@ func TestSignal(t *testing.T) {
 			},
 		},
 	)
+	assert.NoError(t, err)
 
-	_ = obj.Start(1)
+	err = obj.Start(1)
+	assert.NoError(t, err)
+
+	// Cannot call RegisterSignal() after wp has already started
+	err = obj.RegisterSignal(syscall.SIGUSR2)
+	assert.Error(t, err)
 
 	time.Sleep(time.Second * time.Duration(1))
 
 	_ = syscall.Kill(os.Getpid(), syscall.SIGUSR1)
 
 	time.Sleep(time.Second * time.Duration(1))
+
+	// Cannot call RegisterSignal() after wp has already stopped
+	err = obj.RegisterSignal(syscall.SIGUSR2)
+	assert.Error(t, err)
+
 	assert.Equal(t, uint32(2), count)
 }
 
