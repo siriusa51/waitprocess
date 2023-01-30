@@ -3,6 +3,7 @@ package waitprocess
 import (
 	"context"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"os"
 	"os/signal"
 	"sync"
@@ -265,7 +266,10 @@ func (wp *WaitProcess) start(timeout ...int) error {
 				ch := make(chan os.Signal)
 				signal.Notify(ch, wp.signals...)
 				select {
-				case <-ch:
+				case sig := <-ch:
+					logrus.WithFields(logrus.Fields{
+						"signal": sig.String(),
+					}).Info("wrap stop signal")
 				}
 			},
 		})
