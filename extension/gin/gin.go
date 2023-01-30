@@ -29,7 +29,6 @@ func RegisterEngine(addr string, engine *gin.Engine) error {
 		Stop: func(ctx context.Context) {
 			t, c := context.WithTimeout(ctx, time.Second*10)
 			defer c()
-
 			if err := server.Shutdown(t); err != nil {
 				logrus.WithFields(
 					logrus.Fields{
