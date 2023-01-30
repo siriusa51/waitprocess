@@ -95,7 +95,6 @@ func (fps Processes) stop(wp *WaitProcess, ctx context.Context) {
 			if sp.Stop != nil {
 				sp.Stop(ctx)
 			}
-
 			wp.stopWG.Done()
 		}(sp)
 	}
@@ -283,7 +282,7 @@ func (wp *WaitProcess) start(timeout ...int) error {
 }
 
 func (wp *WaitProcess) doStop() {
-	if wp.timeout < 0 {
+	if wp.timeout <= 0 {
 		wp.timeout = defaultTimeout
 	}
 
