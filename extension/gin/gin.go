@@ -9,7 +9,12 @@ import (
 	"time"
 )
 
-func RegisterEngine(addr string, engine *gin.Engine) error {
+func RegisterEngine(addr string, engine *gin.Engine, timeout ...int) error {
+	t := 10
+	if len(timeout) > 0 {
+		t = timeout[0]
+	}
+
 	server := http.Server{
 		Addr:    addr,
 		Handler: engine,
@@ -27,7 +32,7 @@ func RegisterEngine(addr string, engine *gin.Engine) error {
 			}
 		},
 		Stop: func(ctx context.Context) {
-			t, c := context.WithTimeout(ctx, time.Second*10)
+			t, c := context.WithTimeout(ctx, time.Second*time.Duration(t))
 			defer c()
 			if err := server.Shutdown(t); err != nil {
 				logrus.WithFields(
