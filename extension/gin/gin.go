@@ -31,7 +31,7 @@ func RegisterEngine(addr string, engine *gin.Engine, timeout ...int) error {
 				).Error("http.Server.ListenAndServe() error")
 			}
 		},
-		Stop: func(ctx context.Context) {
+		StopForCtx: func(ctx context.Context) {
 			t, c := context.WithTimeout(ctx, time.Second*time.Duration(t))
 			defer c()
 			if err := server.Shutdown(t); err != nil {

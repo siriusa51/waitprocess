@@ -35,20 +35,26 @@ type event struct {
 }
 
 type WaitProcess struct {
+	// waitprocess state
 	state uint32
-
-	timeout   int
-	once      sync.Once
-	startWG   sync.WaitGroup
-	stopWG    sync.WaitGroup
-	stopCh    chan struct{}
+	// set timeout when stopping
+	timeout int
+	// singleton pattern initialisation event handlers
+	once   sync.Once
+	stopWG sync.WaitGroup
+	// receive process stop signal
+	stopCh chan struct{}
+	// registered processes
 	processes Processes
-
+	// registered signal
+	signals []os.Signal
+	// event handlers channel
+	events chan event
+	// notify process register by process.ServeForverWithCtx
 	cancelFunc context.CancelFunc
-
-	signals  []os.Signal
-	events   chan event
-	finishCh chan struct{}
+	// notify process register by process.ServeForverWithChan
+	notifyStopChan chan struct{}
+	finishCh       chan struct{}
 }
 
 var (
@@ -65,9 +71,12 @@ func Default() *WaitProcess {
 }
 
 type Process struct {
-	ServeForver        func()
-	Stop               func(ctx context.Context)
+	ServeForver func()
+	StopForCtx  func(ctx context.Context)
+	StopForChan func(<-chan struct{})
+
 	ServeForverWithCtx func(ctx context.Context)
+	ServeForverWitChan func(<-chan struct{})
 }
 
 type Processes []Process
@@ -82,6 +91,8 @@ func (fps Processes) run(wp *WaitProcess) {
 				sp.ServeForverWithCtx(ctx)
 			} else if sp.ServeForver != nil {
 				sp.ServeForver()
+			} else if sp.ServeForverWitChan != nil {
+				sp.ServeForverWitChan(wp.notifyStopChan)
 			}
 
 			_ = wp.Stop()
@@ -92,9 +103,14 @@ func (fps Processes) run(wp *WaitProcess) {
 func (fps Processes) stop(wp *WaitProcess, ctx context.Context) {
 	for _, sp := range fps {
 		go func(sp Process) {
-			if sp.Stop != nil {
-				sp.Stop(ctx)
+			if sp.StopForCtx != nil {
+				sp.StopForCtx(ctx)
 			}
+
+			if sp.StopForChan != nil {
+				sp.StopForChan(wp.notifyStopChan)
+			}
+
 			wp.stopWG.Done()
 		}(sp)
 	}
@@ -102,10 +118,11 @@ func (fps Processes) stop(wp *WaitProcess, ctx context.Context) {
 
 func New() *WaitProcess {
 	wp := &WaitProcess{
-		state:    stateReady,
-		stopCh:   make(chan struct{}),
-		events:   make(chan event),
-		finishCh: make(chan struct{}),
+		state:          stateReady,
+		stopCh:         make(chan struct{}),
+		events:         make(chan event),
+		finishCh:       make(chan struct{}),
+		notifyStopChan: make(chan struct{}),
 	}
 
 	return wp
@@ -192,8 +209,8 @@ func (wp *WaitProcess) registerProcess(processes ...Process) error {
 		return fmt.Errorf("waitprocess is started")
 	}
 	for _, p := range processes {
-		if p.ServeForver != nil && p.Stop == nil {
-			return fmt.Errorf("if you want to set Process.ServeForver, then you must also set Process.Stop")
+		if p.ServeForver != nil && p.StopForChan == nil && p.StopForCtx == nil {
+			return fmt.Errorf("if you want to set Process.ServeForver, then you must also set Process.StopForChan or Process.StopForCtx")
 		}
 	}
 	wp.processes = append(wp.processes, processes...)
@@ -291,7 +308,10 @@ func (wp *WaitProcess) doStop() {
 	ctx, timeoutFunc := context.WithTimeout(context.Background(), time.Second*time.Duration(wp.timeout))
 	defer timeoutFunc()
 
+	close(wp.notifyStopChan)
+
 	wp.cancelFunc()
+
 	wp.processes.stop(wp, ctx)
 
 	waitGroupCh := make(chan struct{})

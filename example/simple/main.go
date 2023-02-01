@@ -29,7 +29,7 @@ func main() {
 	s := sleep{}
 	err := waitprocess.RegisterProcess(waitprocess.Process{
 		ServeForver:        s.sleep,
-		Stop:               s.stop,
+		StopForCtx:         s.stop,
 		ServeForverWithCtx: nil,
 	})
 
