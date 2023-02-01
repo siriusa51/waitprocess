@@ -30,7 +30,7 @@ func TestWaitProcess(t *testing.T) {
 					atomic.AddUint32(&count, 1)
 				}
 			},
-			Stop: func(ctx context.Context) {
+			StopForCtx: func(ctx context.Context) {
 				ch <- struct{}{}
 			},
 		},
@@ -95,7 +95,7 @@ func TestSignal(t *testing.T) {
 					atomic.AddUint32(&count, 1)
 				}
 			},
-			Stop: func(ctx context.Context) {
+			StopForCtx: func(ctx context.Context) {
 				ch <- struct{}{}
 			},
 		},
