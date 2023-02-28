@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/siriusa51/waitprocess"
-	egin "github.com/siriusa51/waitprocess/extension/gin"
+	"github.com/siriusa51/waitprocess/extension/httpserver"
 	"io/ioutil"
 	"net/http"
 	"time"
@@ -16,7 +16,7 @@ func main() {
 	})
 
 	// register router
-	if err := egin.RegisterEngine(":8080", router); err != nil {
+	if err := httpserver.RegisterHTTPServer(":8080", router); err != nil {
 		panic(err)
 	}
 
