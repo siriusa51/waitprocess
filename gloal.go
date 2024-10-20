@@ -35,8 +35,8 @@ func Start() {
 }
 
 // Run starts the WaitProcess and waits for it to stop.
-func Run() error {
-	return Default().Run()
+func Run() {
+	Default().Run()
 }
 
 // Stop stops the WaitProcess.

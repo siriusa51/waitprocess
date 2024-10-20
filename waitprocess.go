@@ -80,12 +80,11 @@ func (wp *WaitProcess) Start() {
 }
 
 // Run starts the waitprocess and waits for it to stop
-func (wp *WaitProcess) Run() error {
+func (wp *WaitProcess) Run() {
 	wp.lock.Lock()
 	wp.lock.Unlock()
 	wp.start()
 	wp.wait()
-	return nil
 }
 
 // Stop stops the waitprocess
