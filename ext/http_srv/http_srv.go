@@ -49,7 +49,7 @@ func WithWaitProcess(wp *waitprocess.WaitProcess) HttpServerOptionFunc {
 	}
 }
 
-func RunWithHttpSrv(addr string, handler http.Handler, fs ...HttpServerOptionFunc) *waitprocess.WaitProcess {
+func RegisterHttpSrv(addr string, handler http.Handler, fs ...HttpServerOptionFunc) *waitprocess.WaitProcess {
 	opt := newHTTPServerOption(fs...)
 
 	srv := http.Server{

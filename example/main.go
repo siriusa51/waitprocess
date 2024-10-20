@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
+	"github.com/siriusa51/waitprocess/v2/ext/http_srv"
 	"net/http"
 	"os"
 
 	"github.com/siriusa51/waitprocess/v2"
-	"github.com/siriusa51/waitprocess/v2/ext/http_srv"
 )
 
 func main() {
@@ -36,7 +36,7 @@ func main() {
 	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
 		writer.Write([]byte("hello"))
 	})
-	http_srv.RunWithHttpSrv(":5050", mux)
+	http_srv.RegisterHttpSrv(":5050", mux)
 
 	// register signal to waitprocess
 	waitprocess.RegisterSignal(os.Interrupt, os.Kill)
