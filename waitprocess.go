@@ -2,384 +2,202 @@ package waitprocess
 
 import (
 	"context"
-	"fmt"
 	"github.com/sirupsen/logrus"
 	"os"
 	"os/signal"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 const (
-	defaultTimeout = 10
-
-	stateReady   = uint32(0)
-	stateRunning = uint32(1)
-	stateStop    = uint32(2)
+	stateReady = iota
+	stateStarted
 )
-
-type eventType int
-
-const (
-	typeRegisterProcess = iota
-	typeRegisterSignal
-	typeStart
-	typeStop
-)
-
-type event struct {
-	types  eventType
-	option interface{}
-	errCh  chan error
-}
 
 type WaitProcess struct {
-	// waitprocess state
-	state uint32
-	// set timeout when stopping
-	timeout int
-	// singleton pattern initialisation event handlers
-	once   sync.Once
-	stopWG sync.WaitGroup
-	// receive process stop signal
-	stopCh chan struct{}
-	// registered processes
-	processes Processes
-	// registered signal
-	signals []os.Signal
-	// event handlers channel
-	events chan event
-	// notify process register by process.ServeForverWithCtx
-	cancelFunc context.CancelFunc
-	// notify process register by process.ServeForverWithChan
-	notifyStopChan chan struct{}
-	finishCh       chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
+	state      int
+	lock       sync.Mutex
+	log        *logrus.Entry
+	signalChan chan os.Signal
+	procs      []*procstat
+	timer      *time.Timer
+	stopChan   chan struct{}
 }
 
-var (
-	once       sync.Once
-	defaultObj *WaitProcess
-)
+// NewWaitProcess creates a new waitprocess
+func NewWaitProcess(opts ...WaitProcessOption) *WaitProcess {
+	opt := newWaitProcessOption(opts...)
 
-func Default() *WaitProcess {
-	once.Do(func() {
-		defaultObj = New()
-	})
-
-	return defaultObj
-}
-
-type Process struct {
-	ServeForver func()
-	StopForCtx  func(ctx context.Context)
-	StopForChan func(<-chan struct{})
-
-	ServeForverWithCtx func(ctx context.Context)
-	ServeForverWitChan func(<-chan struct{})
-}
-
-type Processes []Process
-
-func (fps Processes) run(wp *WaitProcess) {
-	ctx, fun := context.WithCancel(context.Background())
-	wp.cancelFunc = fun
-
-	for _, sp := range fps {
-		go func(sp Process) {
-			if sp.ServeForverWithCtx != nil {
-				sp.ServeForverWithCtx(ctx)
-			} else if sp.ServeForver != nil {
-				sp.ServeForver()
-			} else if sp.ServeForverWitChan != nil {
-				sp.ServeForverWitChan(wp.notifyStopChan)
-			}
-
-			_ = wp.Stop()
-		}(sp)
+	ctx, cancel := context.WithCancel(opt.ctx)
+	return &WaitProcess{
+		timer:      opt.timer,
+		ctx:        ctx,
+		cancel:     cancel,
+		log:        opt.log,
+		signalChan: make(chan os.Signal, 1),
+		state:      stateReady,
+		stopChan:   make(chan struct{}),
 	}
 }
 
-func (fps Processes) stop(wp *WaitProcess, ctx context.Context) {
-	for _, sp := range fps {
-		go func(sp Process) {
-			if sp.StopForCtx != nil {
-				sp.StopForCtx(ctx)
-			}
-
-			if sp.StopForChan != nil {
-				sp.StopForChan(wp.notifyStopChan)
-			}
-
-			wp.stopWG.Done()
-		}(sp)
-	}
+func (wp *WaitProcess) ProcessCount() int {
+	return len(wp.procs)
 }
 
-func New() *WaitProcess {
-	wp := &WaitProcess{
-		state:          stateReady,
-		stopCh:         make(chan struct{}),
-		events:         make(chan event),
-		finishCh:       make(chan struct{}),
-		notifyStopChan: make(chan struct{}),
+// RegisterProcess registers processes to be run by the waitprocess
+func (wp *WaitProcess) RegisterProcess(name string, procs Process) *WaitProcess {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+
+	if wp.state != stateReady {
+		wp.log.Panic("Cannot call RegisterProcess() after WaitProcess has already started")
 	}
 
+	wp.procs = append(wp.procs, newProcstat(name, procs))
 	return wp
 }
 
-func (wp *WaitProcess) getState() uint32 {
-	return atomic.LoadUint32(&wp.state)
-}
+// RegisterSignal registers signals to be caught by the waitprocess
+func (wp *WaitProcess) RegisterSignal(sigs ...os.Signal) *WaitProcess {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
 
-func (wp *WaitProcess) setState(s uint32) {
-	atomic.StoreUint32(&wp.state, s)
-}
-
-func (wp *WaitProcess) eventLoop() {
-	for {
-		select {
-		case e := <-wp.events:
-			wp.processEvent(e)
-		case <-wp.stopCh:
-			// stop signal
-			wp.doStop()
-			break
-		}
+	if wp.state != stateReady {
+		wp.log.Panic("Cannot call RegisterSignal() after WaitProcess has already started")
 	}
+
+	signal.Notify(wp.signalChan, sigs...)
+	return wp
 }
 
-func (wp *WaitProcess) processEvent(e event) {
-	switch e.types {
-	case typeRegisterProcess:
-		e.errCh <- wp.registerProcess(e.option.(Processes)...)
-	case typeRegisterSignal:
-		e.errCh <- wp.registerSignal(e.option.([]os.Signal)...)
-	case typeStart:
-		e.errCh <- wp.start(e.option.([]int)...)
-	case typeStop:
-		e.errCh <- wp.stop()
+// Start starts the waitprocess
+func (wp *WaitProcess) Start() {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+	wp.start()
+}
+
+// Run starts the waitprocess and waits for it to stop
+func (wp *WaitProcess) Run() error {
+	wp.lock.Lock()
+	wp.lock.Unlock()
+	wp.start()
+	wp.wait()
+	return nil
+}
+
+// Stop stops the waitprocess
+func (wp *WaitProcess) Stop() {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+	wp.stop()
+}
+
+func (wp *WaitProcess) Stopped() bool {
+	select {
+	case <-wp.stopChan:
+		return true
 	default:
-		e.errCh <- fmt.Errorf("unknown event type")
+		return false
 	}
 }
 
-func (wp *WaitProcess) pushEvent(etype eventType, option interface{}) error {
-	wp.once.Do(func() {
-		go wp.eventLoop()
-	})
-
-	e := event{
-		types:  etype,
-		option: option,
-		errCh:  make(chan error),
-	}
-
-	select {
-	case wp.events <- e:
-	case <-wp.finishCh:
-		if etype == typeStop {
-			return nil
-		}
-
-		return fmt.Errorf("waitprocess is stopped")
-	}
-
-	select {
-	case err := <-e.errCh:
-		return err
-	case <-wp.finishCh:
-		if etype == typeStop {
-			return nil
-		}
-
-		return fmt.Errorf("waitprocess is stopped")
-	}
+// Wait waits for the waitprocess to stop
+func (wp *WaitProcess) Wait(timeout ...time.Duration) {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+	wp.wait(timeout...)
 }
 
-// single thead
-func (wp *WaitProcess) RegisterProcess(processes ...Process) error {
-	return wp.pushEvent(typeRegisterProcess, Processes(processes))
+// Shutdown stops the waitprocess and waits for it to stop
+func (wp *WaitProcess) Shutdown(timeout ...time.Duration) {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+	wp.stop()
+	wp.wait(timeout...)
 }
 
-// single thead
-// add loop forerver process functions
-func (wp *WaitProcess) registerProcess(processes ...Process) error {
-	if wp.getState() != stateReady {
-		return fmt.Errorf("waitprocess is started")
-	}
-	for _, p := range processes {
-		if p.ServeForver != nil && p.StopForChan == nil && p.StopForCtx == nil {
-			return fmt.Errorf("if you want to set Process.ServeForver, then you must also set Process.StopForChan or Process.StopForCtx")
-		}
-	}
-	wp.processes = append(wp.processes, processes...)
-	return nil
-}
-
-// single thead
-func (wp *WaitProcess) RegisterSignal(sigs ...os.Signal) error {
-	return wp.pushEvent(typeRegisterSignal, sigs)
-}
-
-// single thead
-// add os signal
-func (wp *WaitProcess) registerSignal(sigs ...os.Signal) error {
-	if wp.getState() != stateReady {
-		return fmt.Errorf("waitprocess is started")
-	}
-	if len(sigs) == 0 {
-		return nil
+func (wp *WaitProcess) start() {
+	if wp.state != stateReady {
+		wp.log.Panic("Cannot call Start() after WaitProcess has already started")
 	}
 
-	wp.signals = append(wp.signals, sigs...)
-	return nil
-}
-
-// single thead
-func (wp *WaitProcess) Stop() error {
-	return wp.pushEvent(typeStop, nil)
-}
-
-// single thead
-func (wp *WaitProcess) stop() error {
-	if wp.getState() == stateReady {
-		return fmt.Errorf("waitprocess not started")
+	if len(wp.procs) == 0 {
+		wp.log.Panic("Cannot start WaitProcess without any processes")
 	}
 
-	if wp.getState() == stateStop {
-		return nil
+	wg := sync.WaitGroup{}
+	wg.Add(len(wp.procs))
+
+	for i := range wp.procs {
+		proc := wp.procs[i]
+		log := wp.log.WithField("proc", proc)
+		log.Debug("Starting process")
+		proc.setContext(wp.ctx)
+
+		go func() {
+			defer wg.Done()
+			defer wp.cancel()
+			proc.run()
+			log.Debug("Process stopped")
+		}()
 	}
-
-	// set state
-	wp.setState(stateStop)
-
-	// notify stop
-	wp.stopCh <- struct{}{}
-	return nil
-}
-
-// single thead
-func (wp *WaitProcess) Start(timeout ...int) error {
-	return wp.pushEvent(typeStart, timeout)
-}
-
-// single thead
-func (wp *WaitProcess) start(timeout ...int) error {
-	if wp.getState() != stateReady {
-		return fmt.Errorf("waitprocess is started")
-	}
-
-	wp.setState(stateRunning)
-
-	if len(timeout) > 1 {
-		wp.timeout = timeout[0]
-	}
-
-	if len(wp.signals) != 0 {
-		wp.processes = append(wp.processes, Process{
-			ServeForver: func() {
-				ch := make(chan os.Signal)
-				signal.Notify(ch, wp.signals...)
-				select {
-				case sig := <-ch:
-					logrus.WithFields(logrus.Fields{
-						"signal": sig.String(),
-					}).Info("wrap stop signal")
-				}
-			},
-		})
-	}
-
-	wp.stopWG.Add(len(wp.processes))
-	wp.stopCh = make(chan struct{}, len(wp.processes)+1)
-	wp.processes.run(wp)
-
-	return nil
-}
-
-func (wp *WaitProcess) doStop() {
-	if wp.timeout <= 0 {
-		wp.timeout = defaultTimeout
-	}
-
-	signal.Reset(wp.signals...)
-
-	ctx, timeoutFunc := context.WithTimeout(context.Background(), time.Second*time.Duration(wp.timeout))
-	defer timeoutFunc()
-
-	close(wp.notifyStopChan)
-
-	wp.cancelFunc()
-
-	wp.processes.stop(wp, ctx)
-
-	waitGroupCh := make(chan struct{})
 
 	go func() {
-		wp.stopWG.Wait()
-		waitGroupCh <- struct{}{}
+		var timer <-chan time.Time
+
+		if wp.timer != nil {
+			timer = wp.timer.C
+		} else {
+			tch := make(chan time.Time)
+			defer close(tch)
+			timer = tch
+		}
+
+		select {
+		case <-wp.signalChan:
+			wp.log.Debug("Received signal, stopping WaitProcess")
+		case <-wp.ctx.Done():
+			wp.log.Debug("Context done, stopping WaitProcess")
+		case <-timer:
+			wp.log.Debug("Timer done, stopping WaitProcess")
+		}
+
+		for i := range wp.procs {
+			proc := wp.procs[i]
+			wp.log.WithField("proc", proc).Debug("Stopping process")
+			proc.stop()
+		}
+
+		wg.Wait()
+		close(wp.stopChan)
 	}()
 
-	select {
-	case <-ctx.Done():
-		// timeout
-	case <-waitGroupCh:
-		// stop function done
+	wp.state = stateStarted
+	wp.log.Info("WaitProcess started")
+}
+
+func (wp *WaitProcess) stop() {
+	if wp.state != stateStarted {
+		wp.log.Panic("Cannot call Stop() before WaitProcess has started")
 	}
 
-	// notify wait
-	close(wp.finishCh)
+	wp.cancel()
 }
 
-// wait process stop
-func (wp *WaitProcess) Wait() {
-	select {
-	case <-wp.finishCh:
+func (wp *WaitProcess) wait(timeout ...time.Duration) {
+	if wp.state != stateStarted {
+		wp.log.Panic("Cannot call Wait() before WaitProcess has started")
 	}
-}
 
-// process will start and block to the end
-func (wp *WaitProcess) Run(timeout ...int) error {
-	if err := wp.Start(timeout...); err != nil {
-		return err
+	if len(timeout) > 0 {
+		select {
+		case <-wp.stopChan:
+		case <-time.After(timeout[0]):
+		}
+	} else {
+		<-wp.stopChan
 	}
-	wp.Wait()
-	return nil
-}
-
-func (wp *WaitProcess) StopAndWait() error {
-	if err := wp.Stop(); err != nil {
-		return err
-	}
-	wp.Wait()
-	return nil
-}
-
-func RegisterProcess(processes ...Process) error {
-	return Default().RegisterProcess(processes...)
-}
-
-func RegisterSignal(sigs ...os.Signal) error {
-	return Default().registerSignal(sigs...)
-}
-
-func Stop() error {
-	return Default().Stop()
-}
-
-func Start(timeout ...int) error {
-	return Default().Start(timeout...)
-}
-
-func Wait() {
-	Default().Wait()
-}
-
-func StopAndWait() error {
-	return Default().StopAndWait()
-}
-
-func Run() error {
-	return Default().Run()
 }
