@@ -21,6 +21,8 @@ import "github.com/siriusa51/waitprocess/v2"
 ## Example
 
 ```go
+//go:build nocover
+
 package main
 
 import (
@@ -33,7 +35,7 @@ import (
 )
 
 func main() {
-	waitprocess.RegisterProcess("case1", waitprocess.RunWithStopFunc(
+	waitprocess.RegisterProcess("app1", waitprocess.RunWithStopFunc(
 		func() {
 			// do something and run forever
 		},
@@ -42,13 +44,13 @@ func main() {
 		},
 	))
 
-	waitprocess.RegisterProcess("case2", waitprocess.RunWithCtx(
+	waitprocess.RegisterProcess("app2", waitprocess.RunWithCtx(
 		func(ctx context.Context) {
 			// do something and run forever, stop by context
 		},
 	))
 
-	waitprocess.RegisterProcess("case3", waitprocess.RunWithChan(
+	waitprocess.RegisterProcess("app3", waitprocess.RunWithChan(
 		func(i <-chan struct{}) {
 			// do something and run forever, stop by channel
 		},
@@ -70,5 +72,6 @@ func main() {
 		panic(err)
 	}
 }
+
 ```
 
