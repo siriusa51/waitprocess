@@ -2,6 +2,7 @@ package waitprocess
 
 import (
 	"context"
+	"fmt"
 	"github.com/sirupsen/logrus"
 	"os"
 	"os/signal"
@@ -16,6 +17,13 @@ const (
 	stateStarted
 )
 
+var WaitTimeout = fmt.Errorf("Wait timeout")
+
+// IsWaitTimeout returns true if the error is a WaitTimeout error
+func IsWaitTimeout(err error) bool {
+	return err == WaitTimeout
+}
+
 type WaitProcess struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -27,6 +35,7 @@ type WaitProcess struct {
 	timer      *time.Timer
 	stopChan   chan struct{}
 	panicked   unsafe.Pointer
+	error      unsafe.Pointer
 }
 
 // NewWaitProcess creates a new waitprocess
@@ -83,11 +92,11 @@ func (wp *WaitProcess) Start() {
 }
 
 // Run starts the waitprocess and waits for it to stop
-func (wp *WaitProcess) Run() {
+func (wp *WaitProcess) Run() error {
 	wp.lock.Lock()
 	wp.lock.Unlock()
 	wp.start()
-	wp.wait()
+	return wp.wait()
 }
 
 // Stop stops the waitprocess
@@ -107,18 +116,30 @@ func (wp *WaitProcess) Stopped() bool {
 }
 
 // Wait waits for the waitprocess to stop
-func (wp *WaitProcess) Wait(timeout ...time.Duration) {
+func (wp *WaitProcess) Wait(timeout ...time.Duration) error {
 	wp.lock.Lock()
 	defer wp.lock.Unlock()
-	wp.wait(timeout...)
+	return wp.wait(timeout...)
 }
 
 // Shutdown stops the waitprocess and waits for it to stop
-func (wp *WaitProcess) Shutdown(timeout ...time.Duration) {
+func (wp *WaitProcess) Shutdown(timeout ...time.Duration) error {
 	wp.lock.Lock()
 	defer wp.lock.Unlock()
 	wp.stop()
-	wp.wait(timeout...)
+	return wp.wait(timeout...)
+}
+
+// Error returns the error of the waitprocess, only return the first error
+func (wp *WaitProcess) Error() error {
+	if wp.state != stateStarted {
+		wp.log.Panic("Cannot call Error() before WaitProcess has started")
+	}
+
+	if err := atomic.LoadPointer(&wp.error); err != nil {
+		return *(*error)(err)
+	}
+	return nil
 }
 
 func (wp *WaitProcess) start() {
@@ -140,13 +161,18 @@ func (wp *WaitProcess) start() {
 		proc.setContext(wp.ctx)
 
 		go func() {
-			defer wg.Done()
-			defer wp.cancel()
-			proc.run()
+			defer func() {
+				if panicked := proc.getPanicked(); panicked != nil {
+					atomic.CompareAndSwapPointer(&wp.panicked, nil, panicked)
+					log.WithField("panic", panicked).Error("Process panicked")
+				}
+				wg.Done()
+				wp.cancel()
+			}()
 
-			if panicked := proc.getPanicked(); panicked != nil {
-				atomic.CompareAndSwapPointer(&wp.panicked, nil, panicked)
-				log.WithField("panic", panicked).Error("Process panicked")
+			if err := proc.run(); err != nil {
+				atomic.CompareAndSwapPointer(&wp.error, nil, unsafe.Pointer(&err))
+				log.WithField("error", err).Error("Process error")
 			}
 
 			log.Debug("Process stopped")
@@ -195,7 +221,7 @@ func (wp *WaitProcess) stop() {
 	wp.cancel()
 }
 
-func (wp *WaitProcess) wait(timeout ...time.Duration) {
+func (wp *WaitProcess) wait(timeout ...time.Duration) error {
 	if wp.state != stateStarted {
 		wp.log.Panic("Cannot call Wait() before WaitProcess has started")
 	}
@@ -204,6 +230,7 @@ func (wp *WaitProcess) wait(timeout ...time.Duration) {
 		select {
 		case <-wp.stopChan:
 		case <-time.After(timeout[0]):
+			return WaitTimeout
 		}
 	} else {
 		<-wp.stopChan
@@ -212,4 +239,6 @@ func (wp *WaitProcess) wait(timeout ...time.Duration) {
 	if panicked := atomic.LoadPointer(&wp.panicked); panicked != nil {
 		panic(*(*any)(panicked))
 	}
+
+	return wp.Error()
 }

@@ -3,12 +3,12 @@ package waitprocess
 import "context"
 
 type stopFuncProcess struct {
-	runFunc  func()
+	runFunc  func() error
 	stopFunc func()
 }
 
 // RunWithStopFunc create a Process with runFunc and stopFunc, call stop to stop runFunc
-func RunWithStopFunc(runFunc func(), stopFunc func()) Process {
+func RunWithStopFunc(runFunc func() error, stopFunc func()) Process {
 	return &stopFuncProcess{
 		runFunc:  runFunc,
 		stopFunc: stopFunc,
@@ -18,8 +18,8 @@ func RunWithStopFunc(runFunc func(), stopFunc func()) Process {
 func (p *stopFuncProcess) SetContext(_ context.Context) {
 }
 
-func (p *stopFuncProcess) Run() {
-	p.runFunc()
+func (p *stopFuncProcess) Run() error {
+	return p.runFunc()
 }
 
 func (p *stopFuncProcess) Stop() {

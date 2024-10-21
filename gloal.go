@@ -35,8 +35,13 @@ func Start() {
 }
 
 // Run starts the WaitProcess and waits for it to stop.
-func Run() {
-	Default().Run()
+func Run() error {
+	return Default().Run()
+}
+
+// Error returns the error of the WaitProcess.
+func Error() error {
+	return Default().Error()
 }
 
 // Stop stops the WaitProcess.
@@ -50,6 +55,6 @@ func Wait() {
 }
 
 // Shutdown stops the WaitProcess.
-func Shutdown() {
-	Default().Shutdown()
+func Shutdown() error {
+	return Default().Shutdown()
 }

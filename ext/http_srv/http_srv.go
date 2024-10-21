@@ -58,11 +58,13 @@ func RegisterHttpSrv(addr string, handler http.Handler, fs ...HttpServerOptionFu
 	}
 
 	return opt.wp.RegisterProcess(opt.name, waitprocess.RunWithStopFunc(
-		func() {
+		func() error {
 			err := srv.ListenAndServe()
 			if err != nil && err != http.ErrServerClosed {
-				opt.log.WithError(err).Panic("http.Server.ListenAndServe() error")
+				return err
 			}
+
+			return nil
 		},
 		func() {
 			ctx, cancel := context.WithTimeout(context.Background(), opt.timeout)

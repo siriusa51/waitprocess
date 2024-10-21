@@ -12,14 +12,16 @@ func TestRunWithChan(t *testing.T) {
 
 		stat := &teststate{}
 
-		wp.RegisterProcess("test", RunWithChan(func(cancel <-chan struct{}) {
+		wp.RegisterProcess("test", RunWithChan(func(cancel <-chan struct{}) error {
 			<-cancel
 			stat.add()
+			return nil
 		}))
 
 		wp.Start()
 		wp.Stop()
-		wp.Wait()
+		err := wp.Wait()
+		assert.Nil(t, err, "error should be nil")
 
 		assert.Equal(t, 1, stat.getstate(), "state should be 1")
 	})
@@ -30,17 +32,20 @@ func TestRunWithChan(t *testing.T) {
 		stat1 := &teststate{}
 		stat2 := &teststate{}
 
-		wp.RegisterProcess("test1", RunWithChan(func(cancel <-chan struct{}) {
+		wp.RegisterProcess("test1", RunWithChan(func(cancel <-chan struct{}) error {
 			<-cancel
 			stat1.add()
-		})).RegisterProcess("test2", RunWithChan(func(cancel <-chan struct{}) {
+			return nil
+		})).RegisterProcess("test2", RunWithChan(func(cancel <-chan struct{}) error {
 			<-cancel
 			stat2.add()
+			return nil
 		}))
 
 		wp.Start()
 		time.Sleep(time.Second)
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err, "error should be nil")
 
 		assert.Equal(t, 1, stat1.getstate(), "state should be 1")
 		assert.Equal(t, 1, stat2.getstate(), "state should be 1")
@@ -52,15 +57,34 @@ func TestRunWithChan(t *testing.T) {
 
 		stat := &teststate{}
 
-		wp.RegisterProcess("noloop", RunWithChan(func(cancel <-chan struct{}) {
+		wp.RegisterProcess("noloop", RunWithChan(func(cancel <-chan struct{}) error {
 			time.Sleep(time.Second)
-		})).RegisterProcess("loop", RunWithChan(func(cancel <-chan struct{}) {
+			return nil
+		})).RegisterProcess("loop", RunWithChan(func(cancel <-chan struct{}) error {
 			<-cancel
 			stat.add()
+			return nil
 		}))
 
-		wp.Run()
+		err := wp.Run()
+		assert.Nil(t, err, "error should be nil")
 
+		assert.Equal(t, 1, stat.getstate(), "state should be 1")
+	})
+
+	// test error process
+	t.Run("case-error-process", func(t *testing.T) {
+		wp := NewWaitProcess()
+
+		stat := &teststate{}
+		wp.RegisterProcess("error", RunWithChan(func(cancel <-chan struct{}) error {
+			stat.add()
+			return assert.AnError
+		}))
+		wp.RegisterProcess("loop", withTestprocess())
+
+		err := wp.Run()
+		assert.NotNil(t, err, "error should be not nil")
 		assert.Equal(t, 1, stat.getstate(), "state should be 1")
 	})
 }

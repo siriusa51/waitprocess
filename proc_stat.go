@@ -29,14 +29,14 @@ func (p *procstat) getPanicked() unsafe.Pointer {
 	return p.panicked
 }
 
-func (p *procstat) run() {
+func (p *procstat) run() error {
 	defer func() {
 		if r := recover(); r != nil {
 			p.panicked = unsafe.Pointer(&r)
 		}
 	}()
 
-	p.proc.Run()
+	return p.proc.Run()
 }
 
 func (p *procstat) stop() {

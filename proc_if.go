@@ -3,7 +3,7 @@ package waitprocess
 import "context"
 
 type Process interface {
-	Run()
+	Run() error
 	Stop()
 	SetContext(ctx context.Context)
 }

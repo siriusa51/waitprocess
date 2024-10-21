@@ -14,9 +14,10 @@ func TestRunWithStopFunc(t *testing.T) {
 
 		ch := make(chan struct{})
 		wp.RegisterProcess("test", RunWithStopFunc(
-			func() {
+			func() error {
 				<-ch
 				stat.add()
+				return nil
 			},
 			func() {
 				close(ch)
@@ -25,7 +26,8 @@ func TestRunWithStopFunc(t *testing.T) {
 		))
 
 		wp.Start()
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err, "shutdown should be success")
 
 		assert.Equal(t, 2, stat.getstate(), "state should be 1")
 	})
@@ -40,18 +42,20 @@ func TestRunWithStopFunc(t *testing.T) {
 		ch2 := make(chan struct{})
 
 		wp.RegisterProcess("test1", RunWithStopFunc(
-			func() {
+			func() error {
 				<-ch1
 				stat1.add()
+				return nil
 			},
 			func() {
 				close(ch1)
 				stat1.add()
 			},
 		)).RegisterProcess("test2", RunWithStopFunc(
-			func() {
+			func() error {
 				<-ch2
 				stat2.add()
+				return nil
 			},
 			func() {
 				close(ch2)
@@ -61,7 +65,8 @@ func TestRunWithStopFunc(t *testing.T) {
 
 		wp.Start()
 		time.Sleep(time.Second)
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err, "shutdown should be success")
 
 		assert.Equal(t, 2, stat1.getstate(), "state should be 1")
 		assert.Equal(t, 2, stat2.getstate(), "state should be 1")
@@ -75,17 +80,19 @@ func TestRunWithStopFunc(t *testing.T) {
 		stat2 := &teststate{}
 		ch := make(chan struct{})
 		wp.RegisterProcess("noloop", RunWithStopFunc(
-			func() {
+			func() error {
 				time.Sleep(time.Second * 1)
 				stat1.add()
+				return nil
 			},
 			func() {
 				stat1.add()
 			},
 		)).RegisterProcess("loop", RunWithStopFunc(
-			func() {
+			func() error {
 				<-ch
 				stat2.add()
+				return nil
 			},
 			func() {
 				close(ch)
@@ -93,9 +100,26 @@ func TestRunWithStopFunc(t *testing.T) {
 			},
 		))
 
-		wp.Run()
+		err := wp.Run()
+		assert.Nil(t, err, "run should be success")
 
 		assert.Equal(t, 2, stat1.getstate(), "state should be 1")
 		assert.Equal(t, 2, stat2.getstate(), "state should be 1")
+	})
+
+	// test error process
+	t.Run("case-error-process", func(t *testing.T) {
+		wp := NewWaitProcess()
+		wp.RegisterProcess("loop", withTestprocess())
+		wp.RegisterProcess("error", RunWithStopFunc(
+			func() error {
+				return assert.AnError
+			},
+			func() {
+			},
+		))
+
+		err := wp.Run()
+		assert.NotNil(t, err, "run should be error")
 	})
 }

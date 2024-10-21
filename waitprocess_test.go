@@ -4,47 +4,10 @@ import (
 	"context"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
-
-type testprocess struct {
-	ch        chan struct{}
-	runCount  int32
-	stopCount int32
-	stopped   int32
-}
-
-func withTestprocess() *testprocess {
-	return &testprocess{
-		ch: make(chan struct{}),
-	}
-}
-
-func (tp *testprocess) getRunCount() int {
-	return int(atomic.LoadInt32(&tp.runCount))
-}
-
-func (tp *testprocess) getStopCount() int {
-	return int(atomic.LoadInt32(&tp.stopCount))
-}
-
-func (tp *testprocess) Run() {
-	atomic.AddInt32(&tp.runCount, 1)
-	<-tp.ch
-}
-
-func (tp *testprocess) Stop() {
-	atomic.AddInt32(&tp.stopCount, 1)
-	if ok := atomic.CompareAndSwapInt32(&tp.stopped, 0, 1); ok {
-		close(tp.ch)
-	}
-}
-
-func (tp *testprocess) SetContext(_ context.Context) {
-}
 
 func TestRegisterProcess(t *testing.T) {
 	t.Run("normal", func(t *testing.T) {
@@ -74,7 +37,8 @@ func TestRegisterProcess(t *testing.T) {
 		wp.RegisterProcess("test1", withTestprocess())
 
 		wp.Start()
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err)
 
 		assert.Panics(t, func() {
 			wp.RegisterProcess("test2", withTestprocess())
@@ -92,7 +56,8 @@ func TestRegisterSignal(t *testing.T) {
 		wp.Start()
 		// mock signal
 		syscall.Kill(syscall.Getpid(), syscall.SIGUSR1)
-		wp.Wait()
+		err := wp.Wait()
+		assert.Nil(t, err)
 
 		assert.Equal(t, 1, tp.getRunCount(), "run count should be 1")
 		assert.Equal(t, 1, tp.getStopCount(), "stop count should be 1")
@@ -130,8 +95,9 @@ func TestPanic(t *testing.T) {
 		wp := NewWaitProcess()
 		tp := withTestprocess()
 		wp.RegisterProcess("test", tp)
-		wp.RegisterProcess("panic", RunWithCtx(func(ctx context.Context) {
+		wp.RegisterProcess("panic", RunWithCtx(func(ctx context.Context) error {
 			panic("panic")
+			return nil
 		}))
 
 		assert.Panics(t, func() {
@@ -165,7 +131,8 @@ func TestStart(t *testing.T) {
 		wp := NewWaitProcess()
 		wp.RegisterProcess("test", withTestprocess())
 		wp.Start()
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err)
 
 		assert.Panics(t, func() {
 			wp.Start()
@@ -188,7 +155,8 @@ func TestStop(t *testing.T) {
 		tp2 := withTestprocess()
 		wp.RegisterProcess("test1", tp1).RegisterProcess("test2", tp2)
 		wp.Start()
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err)
 
 		assert.Equal(t, 1, tp1.getRunCount(), "run count should be 1")
 		assert.Equal(t, 1, tp1.getStopCount(), "stop count should be 1")
@@ -212,7 +180,10 @@ func TestRun(t *testing.T) {
 		tp2 := withTestprocess()
 
 		wp.RegisterProcess("test1", tp1).RegisterProcess("test2", tp2)
-		go wp.Run()
+		go func() {
+			err := wp.Run()
+			assert.Nil(t, err)
+		}()
 
 		time.Sleep(time.Second)
 
@@ -238,16 +209,23 @@ func TestRun(t *testing.T) {
 		wp.RegisterProcess("app1", tp)
 		wp.RegisterProcess("app2", withTestprocess())
 
-		go wp.Run()
+		go func() {
+			err := wp.Run()
+			assert.Nil(t, err)
+		}()
+
 		time.Sleep(time.Second)
 		tp.Stop()
 
-		wp.Wait()
+		err := wp.Wait()
+		assert.Nil(t, err)
+
 		assert.True(t, wp.Stopped(), "wp should be stopped")
 		assert.Equal(t, 1, tp.getRunCount(), "run count should be 1")
 		// call twice
 		assert.Equal(t, 2, tp.getStopCount(), "stop count should be 1")
 	})
+
 	t.Run("run-after-stopped", func(t *testing.T) {
 		wp := NewWaitProcess()
 		wp.RegisterProcess("test", withTestprocess())
@@ -257,6 +235,15 @@ func TestRun(t *testing.T) {
 		assert.Panics(t, func() {
 			wp.Run()
 		})
+	})
+
+	t.Run("run-return-error", func(t *testing.T) {
+		wp := NewWaitProcess()
+		wp.RegisterProcess("loop", withTestprocess())
+		wp.RegisterProcess("error", withErrprocess(assert.AnError))
+
+		err := wp.Run()
+		assert.ErrorAs(t, err, &assert.AnError)
 	})
 }
 
@@ -278,7 +265,8 @@ func TestWait(t *testing.T) {
 		assert.Equal(t, 0, tp2.getStopCount(), "stop count should be 0")
 
 		wp.Stop()
-		wp.Wait()
+		err := wp.Wait()
+		assert.Nil(t, err)
 
 		assert.Equal(t, 1, tp1.getRunCount(), "run count should be 1")
 		assert.Equal(t, 1, tp1.getStopCount(), "stop count should be 1")
@@ -303,7 +291,8 @@ func TestWait(t *testing.T) {
 		assert.Equal(t, 1, tp2.getRunCount(), "run count should be 1")
 		assert.Equal(t, 0, tp2.getStopCount(), "stop count should be 0")
 
-		wp.Wait(time.Second)
+		err := wp.Wait(time.Second)
+		assert.ErrorAs(t, err, &WaitTimeout)
 
 		assert.Equal(t, 1, tp1.getRunCount(), "run count should be 1")
 		assert.Equal(t, 0, tp1.getStopCount(), "stop count should be 0")
@@ -312,7 +301,8 @@ func TestWait(t *testing.T) {
 		assert.Equal(t, 0, tp2.getStopCount(), "stop count should be 0")
 
 		wp.Stop()
-		wp.Wait()
+		err = wp.Wait()
+		assert.Nil(t, err)
 
 		assert.Equal(t, 1, tp1.getRunCount(), "run count should be 1")
 		assert.Equal(t, 1, tp1.getStopCount(), "stop count should be 1")
@@ -333,9 +323,21 @@ func TestWait(t *testing.T) {
 		wp := NewWaitProcess()
 		wp.RegisterProcess("test", withTestprocess())
 		wp.Start()
-		wp.Shutdown()
-		wp.Wait(time.Second)
+		err := wp.Shutdown()
+		assert.Nil(t, err)
+		err = wp.Wait(time.Second)
+		assert.Nil(t, err)
 		assert.True(t, wp.Stopped(), "wp should be stopped")
+	})
+
+	t.Run("wait-error", func(t *testing.T) {
+		wp := NewWaitProcess()
+		wp.RegisterProcess("loop", withTestprocess())
+		wp.RegisterProcess("error", withErrprocess(assert.AnError))
+
+		wp.Start()
+		err := wp.Wait()
+		assert.ErrorAs(t, err, &assert.AnError)
 	})
 }
 
@@ -356,7 +358,8 @@ func TestShutdown(t *testing.T) {
 		assert.Equal(t, 1, tp2.getRunCount(), "run count should be 1")
 		assert.Equal(t, 0, tp2.getStopCount(), "stop count should be 0")
 
-		wp.Shutdown()
+		err := wp.Shutdown()
+		assert.Nil(t, err)
 
 		assert.Equal(t, 1, tp1.getRunCount(), "run count should be 1")
 		assert.Equal(t, 1, tp1.getStopCount(), "stop count should be 1")
@@ -371,6 +374,37 @@ func TestShutdown(t *testing.T) {
 		assert.Panics(t, func() {
 			wp.Shutdown()
 		})
+	})
+
+	t.Run("shutdown-stopped", func(t *testing.T) {
+		wp := NewWaitProcess()
+		wp.RegisterProcess("test", withTestprocess())
+		wp.Start()
+		wp.Stop()
+		err := wp.Shutdown()
+		assert.Nil(t, err)
+		assert.True(t, wp.Stopped(), "wp should be stopped")
+	})
+
+	t.Run("shutown-error", func(t *testing.T) {
+		wp := NewWaitProcess()
+		wp.RegisterProcess("loop", withTestprocess())
+		wp.RegisterProcess("error", withErrprocess(assert.AnError))
+
+		wp.Start()
+		err := wp.Shutdown()
+		assert.ErrorAs(t, err, &assert.AnError)
+	})
+
+	t.Run("shutdown-timeout", func(t *testing.T) {
+		wp := NewWaitProcess()
+		wp.RegisterProcess("loop", withTestprocess())
+		wp.RegisterProcess("sleep", withSleepprocess(time.Second*2))
+		wp.Start()
+		defer wp.Shutdown()
+
+		err := wp.Shutdown(time.Second)
+		assert.ErrorAs(t, err, &WaitTimeout)
 	})
 }
 
@@ -420,5 +454,21 @@ func TestNewProcess(t *testing.T) {
 		log := logrus.WithField("pkg", "waitprocess")
 		wp := NewWaitProcess(WithLog(log))
 		assert.Equal(t, log, wp.log)
+	})
+}
+
+func TestIsWaitTimeout(t *testing.T) {
+	t.Run("normal", func(t *testing.T) {
+		assert.True(t, IsWaitTimeout(WaitTimeout))
+		assert.False(t, IsWaitTimeout(assert.AnError))
+	})
+}
+
+func TestError(t *testing.T) {
+	t.Run("call-error-before-start", func(t *testing.T) {
+		wp := NewWaitProcess()
+		assert.Panics(t, func() {
+			wp.Error()
+		})
 	})
 }
