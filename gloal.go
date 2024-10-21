@@ -3,6 +3,7 @@ package waitprocess
 import (
 	"os"
 	"sync"
+	"time"
 )
 
 var (
@@ -50,11 +51,11 @@ func Stop() {
 }
 
 // Wait waits for the WaitProcess to stop.
-func Wait() {
-	Default().Wait()
+func Wait(timeout ...time.Duration) error {
+	return Default().Wait(timeout...)
 }
 
 // Shutdown stops the WaitProcess.
-func Shutdown() error {
-	return Default().Shutdown()
+func Shutdown(timeout ...time.Duration) error {
+	return Default().Shutdown(timeout...)
 }
