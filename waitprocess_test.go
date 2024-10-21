@@ -134,6 +134,8 @@ func TestStart(t *testing.T) {
 		wp.Start()
 		defer wp.Shutdown()
 
+		time.Sleep(time.Second)
+
 		assert.Equal(t, 1, tp1.getRunCount(), "run count should be 1")
 		assert.Equal(t, 0, tp1.getStopCount(), "stop count should be 0")
 		assert.Equal(t, 1, tp2.getRunCount(), "run count should be 1")
