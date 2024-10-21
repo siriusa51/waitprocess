@@ -125,6 +125,25 @@ func TestRegisterSignal(t *testing.T) {
 	})
 }
 
+func TestPanic(t *testing.T) {
+	t.Run("panic", func(t *testing.T) {
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.RegisterProcess("panic", RunWithCtx(func(ctx context.Context) {
+			panic("panic")
+		}))
+
+		assert.Panics(t, func() {
+			wp.Run()
+		})
+
+		assert.True(t, wp.Stopped(), "wp should be stopped")
+		assert.Equal(t, 1, tp.getRunCount(), "run count should be 1")
+		assert.Equal(t, 1, tp.getStopCount(), "stop count should be 1")
+	})
+}
+
 func TestStart(t *testing.T) {
 	t.Run("normal", func(t *testing.T) {
 		wp := NewWaitProcess()

@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 const (
@@ -24,6 +26,7 @@ type WaitProcess struct {
 	procs      []*procstat
 	timer      *time.Timer
 	stopChan   chan struct{}
+	panicked   unsafe.Pointer
 }
 
 // NewWaitProcess creates a new waitprocess
@@ -140,6 +143,12 @@ func (wp *WaitProcess) start() {
 			defer wg.Done()
 			defer wp.cancel()
 			proc.run()
+
+			if panicked := proc.getPanicked(); panicked != nil {
+				atomic.CompareAndSwapPointer(&wp.panicked, nil, panicked)
+				log.WithField("panic", panicked).Error("Process panicked")
+			}
+
 			log.Debug("Process stopped")
 		}()
 	}
@@ -198,5 +207,9 @@ func (wp *WaitProcess) wait(timeout ...time.Duration) {
 		}
 	} else {
 		<-wp.stopChan
+	}
+
+	if panicked := atomic.LoadPointer(&wp.panicked); panicked != nil {
+		panic(*(*any)(panicked))
 	}
 }

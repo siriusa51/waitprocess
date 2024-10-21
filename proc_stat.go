@@ -2,13 +2,15 @@ package waitprocess
 
 import (
 	"context"
+	"unsafe"
 )
 
 type procstat struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	name   string
-	proc   Process
+	ctx      context.Context
+	cancel   context.CancelFunc
+	name     string
+	proc     Process
+	panicked unsafe.Pointer
 }
 
 func newProcstat(name string, proc Process) *procstat {
@@ -23,7 +25,17 @@ func (p *procstat) setContext(ctx context.Context) {
 	p.proc.SetContext(p.ctx)
 }
 
+func (p *procstat) getPanicked() unsafe.Pointer {
+	return p.panicked
+}
+
 func (p *procstat) run() {
+	defer func() {
+		if r := recover(); r != nil {
+			p.panicked = unsafe.Pointer(&r)
+		}
+	}()
+
 	p.proc.Run()
 }
 
