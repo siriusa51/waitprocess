@@ -68,9 +68,7 @@ func main() {
 
 	// start waitprocess, app1, app2, app3, http server will start together
 	// if any app stop or receive signal, all will stop
-	if err := waitprocess.Run(); err != nil {
-		panic(err)
-	}
+	waitprocess.Run()
 }
 
 ```
