@@ -44,6 +44,15 @@ func TestRegisterProcess(t *testing.T) {
 			wp.RegisterProcess("test2", withTestprocess())
 		})
 	})
+
+	t.Run("register-same-process", func(t *testing.T) {
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		assert.Panics(t, func() {
+			wp.RegisterProcess("test", tp)
+		})
+	})
 }
 
 func TestRegisterSignal(t *testing.T) {
@@ -469,6 +478,107 @@ func TestError(t *testing.T) {
 		wp := NewWaitProcess()
 		assert.Panics(t, func() {
 			wp.Error()
+		})
+	})
+}
+
+func TestPreStartHook(t *testing.T) {
+	t.Run("normal", func(t *testing.T) {
+		runCount := 0
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.PreStartHook("hook", func() {
+			runCount += 1
+		})
+
+		assert.Equal(t, 0, runCount, "run count should be 0")
+		wp.Start()
+		assert.Equal(t, 1, runCount, "run count should be 1")
+		wp.Shutdown()
+		assert.Equal(t, 1, runCount, "run count should be 1")
+	})
+
+	t.Run("add-same-hook", func(t *testing.T) {
+		runCount := 0
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.PreStartHook("hook", func() {
+			runCount += 1
+		})
+
+		assert.Panics(t, func() {
+			wp.PreStartHook("hook", func() {
+				runCount += 1
+			})
+		})
+	})
+
+	t.Run("add-hook-after-start", func(t *testing.T) {
+		runCount := 0
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.Start()
+
+		defer wp.Shutdown()
+
+		assert.Panics(t, func() {
+			wp.PreStartHook("hook", func() {
+				runCount += 1
+			})
+		})
+
+	})
+}
+
+func TestAfterStopHook(t *testing.T) {
+	t.Run("normal", func(t *testing.T) {
+		stopCount := 0
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.AfterStopHook("hook", func() {
+			stopCount += 1
+		})
+
+		assert.Equal(t, 0, stopCount, "stop count should be 0")
+		wp.Start()
+		assert.Equal(t, 0, stopCount, "stop count should be 0")
+		wp.Shutdown()
+		assert.Equal(t, 1, stopCount, "stop count should be 1")
+	})
+
+	t.Run("add-same-hook", func(t *testing.T) {
+		stopCount := 0
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.AfterStopHook("hook", func() {
+			stopCount += 1
+		})
+
+		assert.Panics(t, func() {
+			wp.AfterStopHook("hook", func() {
+				stopCount += 1
+			})
+		})
+	})
+
+	t.Run("add-hook-after-start", func(t *testing.T) {
+		stopCount := 0
+		wp := NewWaitProcess()
+		tp := withTestprocess()
+		wp.RegisterProcess("test", tp)
+		wp.Start()
+
+		defer wp.Shutdown()
+
+		assert.Panics(t, func() {
+			wp.AfterStopHook("hook", func() {
+				stopCount += 1
+			})
 		})
 	})
 }

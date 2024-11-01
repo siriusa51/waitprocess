@@ -24,18 +24,27 @@ func IsWaitTimeout(err error) bool {
 	return err == WaitTimeout
 }
 
+type hookFunc func()
+
+type hook struct {
+	name string
+	hook hookFunc
+}
+
 type WaitProcess struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	state      int
-	lock       sync.Mutex
-	log        *logrus.Entry
-	signalChan chan os.Signal
-	procs      []*procstat
-	timer      *time.Timer
-	stopChan   chan struct{}
-	panicked   unsafe.Pointer
-	error      unsafe.Pointer
+	ctx            context.Context
+	cancel         context.CancelFunc
+	state          int32
+	lock           sync.Mutex
+	log            *logrus.Entry
+	signalChan     chan os.Signal
+	procs          *orderMap[string, *procstat]
+	timer          *time.Timer
+	stopChan       chan struct{}
+	panicked       unsafe.Pointer
+	error          unsafe.Pointer
+	preStartHooks  *orderMap[string, hook]
+	afterStopHooks *orderMap[string, hook]
 }
 
 // NewWaitProcess creates a new waitprocess
@@ -44,18 +53,21 @@ func NewWaitProcess(opts ...WaitProcessOption) *WaitProcess {
 
 	ctx, cancel := context.WithCancel(opt.ctx)
 	return &WaitProcess{
-		timer:      opt.timer,
-		ctx:        ctx,
-		cancel:     cancel,
-		log:        opt.log,
-		signalChan: make(chan os.Signal, 1),
-		state:      stateReady,
-		stopChan:   make(chan struct{}),
+		timer:          opt.timer,
+		ctx:            ctx,
+		cancel:         cancel,
+		log:            opt.log,
+		signalChan:     make(chan os.Signal, 1),
+		state:          stateReady,
+		stopChan:       make(chan struct{}),
+		procs:          newOrderMap[string, *procstat](),
+		preStartHooks:  newOrderMap[string, hook](),
+		afterStopHooks: newOrderMap[string, hook](),
 	}
 }
 
 func (wp *WaitProcess) ProcessCount() int {
-	return len(wp.procs)
+	return wp.procs.size()
 }
 
 // RegisterProcess registers processes to be run by the waitprocess
@@ -63,11 +75,15 @@ func (wp *WaitProcess) RegisterProcess(name string, procs Process) *WaitProcess 
 	wp.lock.Lock()
 	defer wp.lock.Unlock()
 
-	if wp.state != stateReady {
+	if wp.getState() != stateReady {
 		wp.log.Panic("Cannot call RegisterProcess() after WaitProcess has already started")
 	}
 
-	wp.procs = append(wp.procs, newProcstat(name, procs))
+	if wp.procs.contains(name) {
+		wp.log.Panicf("Process %s already exists", name)
+	}
+
+	wp.procs.set(name, newProcstat(name, procs))
 	return wp
 }
 
@@ -119,6 +135,7 @@ func (wp *WaitProcess) Stopped() bool {
 func (wp *WaitProcess) Wait(timeout ...time.Duration) error {
 	wp.lock.Lock()
 	defer wp.lock.Unlock()
+
 	return wp.wait(timeout...)
 }
 
@@ -126,36 +143,79 @@ func (wp *WaitProcess) Wait(timeout ...time.Duration) error {
 func (wp *WaitProcess) Shutdown(timeout ...time.Duration) error {
 	wp.lock.Lock()
 	defer wp.lock.Unlock()
+
 	wp.stop()
 	return wp.wait(timeout...)
 }
 
 // Error returns the error of the waitprocess, only return the first error
 func (wp *WaitProcess) Error() error {
-	if wp.state != stateStarted {
-		wp.log.Panic("Cannot call Error() before WaitProcess has started")
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+
+	return wp.getError()
+}
+
+// PreStartHook adds a hook to be run before the waitprocess starts
+func (wp *WaitProcess) PreStartHook(name string, f hookFunc) *WaitProcess {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+
+	if wp.getState() != stateReady {
+		wp.log.Panic("Cannot call PreStartHook() after WaitProcess has already started")
 	}
 
-	if err := atomic.LoadPointer(&wp.error); err != nil {
-		return *(*error)(err)
+	if wp.preStartHooks.contains(name) {
+		wp.log.Panicf("PreStartHook %s already exists", name)
 	}
-	return nil
+
+	wp.preStartHooks.set(name, hook{name: name, hook: f})
+	return wp
+}
+
+// AfterStopHook adds a hook to be run after the waitprocess stops
+func (wp *WaitProcess) AfterStopHook(name string, f hookFunc) *WaitProcess {
+	wp.lock.Lock()
+	defer wp.lock.Unlock()
+
+	if wp.getState() != stateReady {
+		wp.log.Panic("Cannot call AfterStopHook() after WaitProcess has already started")
+	}
+
+	if wp.afterStopHooks.contains(name) {
+		wp.log.Panicf("AfterStopHook %s already exists", name)
+	}
+
+	wp.afterStopHooks.set(name, hook{name: name, hook: f})
+	return wp
+}
+
+func (wp *WaitProcess) getState() int32 {
+	return atomic.LoadInt32(&wp.state)
+}
+
+func (wp *WaitProcess) setState(state int32) {
+	atomic.CompareAndSwapInt32(&wp.state, stateReady, state)
 }
 
 func (wp *WaitProcess) start() {
-	if wp.state != stateReady {
+	if wp.getState() != stateReady {
 		wp.log.Panic("Cannot call Start() after WaitProcess has already started")
 	}
 
-	if len(wp.procs) == 0 {
+	if wp.procs.size() == 0 {
 		wp.log.Panic("Cannot start WaitProcess without any processes")
 	}
 
 	wg := sync.WaitGroup{}
-	wg.Add(len(wp.procs))
+	wg.Add(wp.procs.size())
 
-	for i := range wp.procs {
-		proc := wp.procs[i]
+	wp.preStartHooks.rangeFunc(func(index int, key string, value hook) bool {
+		value.hook()
+		return true
+	})
+
+	wp.procs.rangeFunc(func(_ int, key string, proc *procstat) bool {
 		log := wp.log.WithField("proc", proc)
 		log.Debug("Starting process")
 		proc.setContext(wp.ctx)
@@ -177,7 +237,8 @@ func (wp *WaitProcess) start() {
 
 			log.Debug("Process stopped")
 		}()
-	}
+		return true
+	})
 
 	go func() {
 		var timer <-chan time.Time
@@ -199,22 +260,27 @@ func (wp *WaitProcess) start() {
 			wp.log.Debug("Timer done, stopping WaitProcess")
 		}
 
-		for i := range wp.procs {
-			proc := wp.procs[i]
-			wp.log.WithField("proc", proc).Debug("Stopping process")
+		wp.procs.rangeFunc(func(_ int, name string, proc *procstat) bool {
+			wp.log.WithField("proc", name).Debug("Stopping process")
 			proc.stop()
-		}
+			return true
+		})
 
 		wg.Wait()
 		close(wp.stopChan)
+
+		wp.afterStopHooks.rangeFunc(func(index int, key string, value hook) bool {
+			value.hook()
+			return true
+		})
 	}()
 
-	wp.state = stateStarted
+	wp.setState(stateStarted)
 	wp.log.Info("WaitProcess started")
 }
 
 func (wp *WaitProcess) stop() {
-	if wp.state != stateStarted {
+	if wp.getState() != stateStarted {
 		wp.log.Panic("Cannot call Stop() before WaitProcess has started")
 	}
 
@@ -222,7 +288,7 @@ func (wp *WaitProcess) stop() {
 }
 
 func (wp *WaitProcess) wait(timeout ...time.Duration) error {
-	if wp.state != stateStarted {
+	if wp.getState() != stateStarted {
 		wp.log.Panic("Cannot call Wait() before WaitProcess has started")
 	}
 
@@ -240,5 +306,16 @@ func (wp *WaitProcess) wait(timeout ...time.Duration) error {
 		panic(*(*any)(panicked))
 	}
 
-	return wp.Error()
+	return wp.getError()
+}
+
+func (wp *WaitProcess) getError() error {
+	if wp.getState() != stateStarted {
+		wp.log.Panic("Cannot call Error() before WaitProcess has started")
+	}
+
+	if err := atomic.LoadPointer(&wp.error); err != nil {
+		return *(*error)(err)
+	}
+	return nil
 }

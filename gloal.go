@@ -59,3 +59,13 @@ func Wait(timeout ...time.Duration) error {
 func Shutdown(timeout ...time.Duration) error {
 	return Default().Shutdown(timeout...)
 }
+
+// PreStartHook adds a hook to be run before the waitprocess starts
+func PreStartHook(name string, h hookFunc) *WaitProcess {
+	return Default().PreStartHook(name, h)
+}
+
+// AfterStopHook adds a hook to be run after the waitprocess stops
+func AfterStopHook(name string, h hookFunc) *WaitProcess {
+	return Default().AfterStopHook(name, h)
+}
