@@ -9,11 +9,11 @@ import (
 )
 
 type httpServerOption struct {
-	wp       *waitprocess.WaitProcess
-	timeout  time.Duration
-	name     string
-	log      *logrus.Entry
-	stopFunc func()
+	wp            *waitprocess.WaitProcess
+	timeout       time.Duration
+	name          string
+	log           *logrus.Entry
+	afterStopHook func()
 }
 
 type HttpServerOptionFunc func(*httpServerOption)
@@ -50,9 +50,9 @@ func WithWaitProcess(wp *waitprocess.WaitProcess) HttpServerOptionFunc {
 	}
 }
 
-func WithStopFunc(f func()) HttpServerOptionFunc {
+func WithAfterStopHook(f func()) HttpServerOptionFunc {
 	return func(opt *httpServerOption) {
-		opt.stopFunc = f
+		opt.afterStopHook = f
 	}
 }
 
@@ -81,8 +81,8 @@ func RegisterHttpSrv(addr string, handler http.Handler, fs ...HttpServerOptionFu
 				opt.log.WithError(err).Error("http.Server.Shutdown() error")
 			}
 
-			if opt.stopFunc != nil {
-				opt.stopFunc()
+			if opt.afterStopHook != nil {
+				opt.afterStopHook()
 			}
 		},
 	))
